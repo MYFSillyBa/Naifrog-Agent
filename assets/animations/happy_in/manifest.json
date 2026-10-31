@@ -1,0 +1,211 @@
+{
+  "name": "happy_in",
+  "emotion": "happy",
+  "fps": 33.333333333333336,
+  "frameCount": 47,
+  "loop": false,
+  "priority": 25,
+  "transitionIn": "",
+  "transitionOut": "",
+  "canvas": {
+    "width": 420,
+    "height": 560
+  },
+  "groundY": 540,
+  "mouthAnchor": {
+    "frame": 0,
+    "x": 125,
+    "y": 110
+  },
+  "reviewed": true,
+  "frames": [
+    {
+      "file": "000.png",
+      "sha256": "f0aa0ed8285f4ffb8ad8ded1af78776d1752f5c42dfc60c58731fae59b7522bd"
+    },
+    {
+      "file": "001.png",
+      "sha256": "8589f05950dd02ab6cb3cd53902dd280519e121eec90bd16649b37cb195ed1f4"
+    },
+    {
+      "file": "002.png",
+      "sha256": "4bc4b528fdca19a940220cf46214682a6135ec761233735dae9ccc675a831abb"
+    },
+    {
+      "file": "003.png",
+      "sha256": "a3d8a479732abfe86a3b0ca7cd6f199a0b9483833e351af663cbfe2be759240c"
+    },
+    {
+      "file": "004.png",
+      "sha256": "7aebda85e99b81724530f9f88b763b218cc450f447db39f796a4187e6d5f1fe0"
+    },
+    {
+      "file": "005.png",
+      "sha256": "384e61f0d4067adb32da246059e696652405421bb39498b8be6a76c3e57da07b"
+    },
+    {
+      "file": "006.png",
+      "sha256": "ab6645d562f85599d8d5a76549d1b983d5ee8c99e7d8ba9d3097054804bf9d36"
+    },
+    {
+      "file": "007.png",
+      "sha256": "199668b2aa07e32c6d7f29a40a2926e4d33c490ebb7aa2a0f490208be41284a0"
+    },
+    {
+      "file": "008.png",
+      "sha256": "1e17e0dd1443bb296ae91dcf64b2d54f9ea2906c818b0179638c042c6fda2d47"
+    },
+    {
+      "file": "009.png",
+      "sha256": "35e9e7ec08f746e655c8cbae4535b4824f7fdbe57dc70dd59eb7d318e5465cec"
+    },
+    {
+      "file": "010.png",
+      "sha256": "5ecd110f9e1e8d51ff28b0a2fee3e5463d0686efff74c35e6475e6940c84bed6"
+    },
+    {
+      "file": "011.png",
+      "sha256": "e2841328fc0b910099d253df01af32f572349d7ab7c6694f6a5f5858b82f842a"
+    },
+    {
+      "file": "012.png",
+      "sha256": "fc8f6cb67f688946199e68b882d093bd81dde4dd7cc0e02fa501a01f8fb978b1"
+    },
+    {
+      "file": "013.png",
+      "sha256": "fb3dd3cb3855c5cb828bbe5c477162f9b62343e5200c12f468b7a65ca0283dba"
+    },
+    {
+      "file": "014.png",
+      "sha256": "863e50cd2e949813db2f18ad1e652787f47f2c171e12e84a5e94295576ed508a"
+    },
+    {
+      "file": "015.png",
+      "sha256": "d40b010160cbae2cfa73dc61579f21da1b89094460c462acc63c1464b60c7957"
+    },
+    {
+      "file": "016.png",
+      "sha256": "e466a33f210f5b4f38d165b83d2a06b3c0d0df09e96624ba1480b784c759331a"
+    },
+    {
+      "file": "017.png",
+      "sha256": "2e2f4f5b2f34a9462aa09de922c25eff07033558bc553417a007077f6409cb71"
+    },
+    {
+      "file": "018.png",
+      "sha256": "84a5b0fa5631ae92e5dc2449479546f9f8e3b1128da9aa899f38f5f12b18b088"
+    },
+    {
+      "file": "019.png",
+      "sha256": "1e59333ae6830272b5a23adc67857aa71cd156d87c8021b43ae4cad13868fba8"
+    },
+    {
+      "file": "020.png",
+      "sha256": "63165ea4366e04dc6b98fd3dd2837bb136c776bf51ff95a1814e04095a29ac59"
+    },
+    {
+      "file": "021.png",
+      "sha256": "f721b84316c3cf8e3349502d2580a76ba44a2d81b8ab4a78755d8ea848f812cc"
+    },
+    {
+      "file": "022.png",
+      "sha256": "e0a583caf5b847b845811e7a120f6bb7db4a00b01ad06cbe12b6bf45432280e6"
+    },
+    {
+      "file": "023.png",
+      "sha256": "57db8863fbd4f4695f118f411ff09aa3ac5a57d79730de8d129b1fd49e3f10b3"
+    },
+    {
+      "file": "024.png",
+      "sha256": "89ae93925c5d30d77e2d60bd839460e6ec094c1560144ae475cb12b72420fa60"
+    },
+    {
+      "file": "025.png",
+      "sha256": "cefedc10eeacc19815a1b49cfd5715a62baf87eb73cc462e2a2e8356a1800465"
+    },
+    {
+      "file": "026.png",
+      "sha256": "d0533aa7090a57b01fddec271a4892c1537c9d45e85883ed4f9dc5991848234e"
+    },
+    {
+      "file": "027.png",
+      "sha256": "3cd1e4ef30ff026cad208e8b6038fec5473f5a477efdd88b63a78a3b93076944"
+    },
+    {
+      "file": "028.png",
+      "sha256": "3c4ec7656fa7e8339fafd387f3656716d4803fa709afb8bf69914fbf942b4ec7"
+    },
+    {
+      "file": "029.png",
+      "sha256": "1f74351a10a6e93e4cdd404f53e25eaa5aed814939df4bebb43be1b281069d67"
+    },
+    {
+      "file": "030.png",
+      "sha256": "35982ef766c7c56995df537356e1bd7a88fcb0808c135bc41ccf5e31c45148d8"
+    },
+    {
+      "file": "031.png",
+      "sha256": "9670f169f53b163789ecb8aef9201ea7e7d26c71f043202c55ceec5b24417b51"
+    },
+    {
+      "file": "032.png",
+      "sha256": "3395e5db64326062e64115356767caa374d5b8bb2e16a52153b8ff70ec88a2b6"
+    },
+    {
+      "file": "033.png",
+      "sha256": "f7df90b0bb0906ce2d3f9f79776aa2ecd0c6ab745c36d4f3837d6c9c7b582942"
+    },
+    {
+      "file": "034.png",
+      "sha256": "58e5abb666b0b88e554a73a1132cad19a249853332c7fbf0db81abc08b7febdb"
+    },
+    {
+      "file": "035.png",
+      "sha256": "8d79caed9e3921ec3cbb266fabc07ad6941f1a1479757fa9ad886cf3c37cd9ba"
+    },
+    {
+      "file": "036.png",
+      "sha256": "c1ce98cce11c30622b98ee46be7d99b047a189e480b1e5bb781e24b5e054842e"
+    },
+    {
+      "file": "037.png",
+      "sha256": "bc965e96a18b327e33710c61efe229126c0c35883cda9fda22634ef906f7e31f"
+    },
+    {
+      "file": "038.png",
+      "sha256": "242711e8cdba983e6a6f505e5c27250cd017d664529ec2fb5995b0c398645dc8"
+    },
+    {
+      "file": "039.png",
+      "sha256": "f71a94e50699b21d9160c77fdcc96074021559f0a3b628c10fc587240265ee96"
+    },
+    {
+      "file": "040.png",
+      "sha256": "b564dc2d0c0c2ffc2c87cd5bfb9c5fc1545015594bdfdaf2128ff7169f31e6e0"
+    },
+    {
+      "file": "041.png",
+      "sha256": "434265583151918c19b53c1a812fd5d75b8cbfbd6823aaa17bb5f1f8d8d9dd1c"
+    },
+    {
+      "file": "042.png",
+      "sha256": "8fff97c6164c8991bb66f385f17d762e2303e6d125eb9b20871abcb7776b1716"
+    },
+    {
+      "file": "043.png",
+      "sha256": "d773045edbe4fd8fe8afa6f858d67a3fae516a0641a98ac551b0d44c248e335d"
+    },
+    {
+      "file": "044.png",
+      "sha256": "4ac8e7166b9c7a09bc487ad7fb87c956f45011ae77cf71121c87eeab9c157107"
+    },
+    {
+      "file": "045.png",
+      "sha256": "d60fe9b33bbfc093d7cd7001b8d2f1a962279f5104a1389dc204c9440ce3e315"
+    },
+    {
+      "file": "046.png",
+      "sha256": "0069606a78889bf2ba281177efc23e3ead2607d2e3f445c9419734511e04a03d"
+    }
+  ]
+}

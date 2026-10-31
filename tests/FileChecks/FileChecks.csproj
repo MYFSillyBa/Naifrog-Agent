@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="WindowChecks/**/*.cs" />
+    <Compile Include="../../src/Naifrog/Core/AppSettings.cs" Link="Core/AppSettings.cs" />
+    <Compile Include="../../src/Naifrog/Core/AgentSettings.cs" Link="Core/AgentSettings.cs" />
+    <Compile Include="../../src/Naifrog/Core/SettingsStore.cs" Link="Core/SettingsStore.cs" />
+    <Compile Include="../../src/Naifrog/Files/FileModels.cs" Link="Files/FileModels.cs" />
+    <Compile Include="../../src/Naifrog/Files/FileSafety.cs" Link="Files/FileSafety.cs" />
+    <Compile Include="../../src/Naifrog/Files/OrganizerEngine.cs" Link="Files/OrganizerEngine.cs" />
+    <Compile Include="../../src/Naifrog/Files/FileOrganizerService.cs" Link="Files/FileOrganizerService.cs" />
+  </ItemGroup>
+</Project>

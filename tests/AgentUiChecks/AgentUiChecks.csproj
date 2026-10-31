@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net9.0-windows</TargetFramework><UseWPF>true</UseWPF><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><AssemblyName>Naifrog.AgentUiChecks</AssemblyName></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Naifrog/Naifrog.csproj" /></ItemGroup>
+</Project>

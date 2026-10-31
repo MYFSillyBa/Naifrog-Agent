@@ -1,0 +1,15 @@
+**/bin/
+**/obj/
+output/
+.vs/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.dpapi
+*.pfx
+*.p12
+*.user
+*.suo
+*.log

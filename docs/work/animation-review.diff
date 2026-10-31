@@ -1,0 +1,805 @@
+--- /dev/null
++++ src\Naifrog\Animation\AnimationLibrary.cs
+@@ -0,0 +1,194 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Security.Cryptography;
++using System.Text.Json;
++using System.Text.RegularExpressions;
++using System.Windows.Media.Imaging;
++
++namespace Naifrog.Animation;
++
++internal sealed record AnimationFrame(string Path, string Sha256);
++internal sealed record AnimationClip(string Name, string Emotion, double Fps, bool Loop, int Priority,
++    string? TransitionIn, string? TransitionOut, int Width, int Height, double GroundY,
++    IReadOnlyList<AnimationFrame> Frames)
++{
++    public double DurationMs => Frames.Count / Fps * 1000;
++}
++
++/// <summary>Lazy, bounded reader for a trusted-format but untrusted-content PNG animation pack.</summary>
++internal sealed class AnimationLibrary : IDisposable
++{
++    private const int MaxFrameBytes = 4 * 1024 * 1024;
++    private const long MaxClipBytes = 64L * 1024 * 1024;
++    private const long MaxDecodedClipBytes = 128L * 1024 * 1024;
++    private const long MaxCacheBytes = 192L * 1024 * 1024;
++    private readonly string root;
++    private readonly Dictionary<string, AnimationClip?> metadata = new(StringComparer.Ordinal);
++    private readonly Dictionary<string, CacheEntry> cache = new(StringComparer.Ordinal);
++    private readonly HashSet<string> rejectedFrames = new(StringComparer.Ordinal);
++    private long cacheBytes, sequence;
++    private sealed record CacheEntry(IReadOnlyList<BitmapSource> Frames, long Bytes) { public long Used { get; set; } }
++    public string LastError { get; private set; } = "";
++    internal long DecodedCacheBytes => cacheBytes;
++
++    public AnimationLibrary(string root) { this.root = Path.GetFullPath(root); }
++
++    public AnimationClip? TryGetInfo(string name)
++    {
++        if (!SafeName(name)) return null;
++        if (metadata.TryGetValue(name, out var known)) return known;
++        if (metadata.Count >= 128) return null;
++        AnimationClip? result = null;
++        try
++        {
++            var directory = Path.Combine(root, name);
++            CheckNoLinks(directory);
++            var manifest = Path.Combine(directory, "manifest.json");
++            CheckNoLinks(manifest);
++            using var document = JsonDocument.Parse(ReadBounded(manifest, 256 * 1024), new JsonDocumentOptions { MaxDepth = 16 });
++            var json = document.RootElement;
++            string clipName = Text(json, "name");
++            if (clipName != name) throw new InvalidDataException("片段名称不匹配");
++            var emotion = Text(json, "emotion");
++            if (!SafeName(emotion)) throw new InvalidDataException("情绪名称无效");
++            double fps = Number(json, "fps");
++            int frameCount = Integer(json, "frameCount");
++            if (fps < 1 || fps > 60 || frameCount < 1 || frameCount > 240) throw new InvalidDataException("帧数或帧率超出限制");
++            var canvas = Property(json, "canvas");
++            int width = Integer(canvas, "width"), height = Integer(canvas, "height");
++            if (width < 1 || width > 2048 || height < 1 || height > 2048 || (long)width * height * 4 * frameCount > MaxDecodedClipBytes)
++                throw new InvalidDataException("画布或解码内存超出限制");
++            double groundY = Number(json, "groundY");
++            if (groundY < 0 || groundY > height) throw new InvalidDataException("脚底基线无效");
++            bool loop = Property(json, "loop").GetBoolean();
++            int priority = Integer(json, "priority");
++            if (priority < 0 || priority > 100) throw new InvalidDataException("优先级无效");
++            string? entry = OptionalName(json, "transitionIn"), exit = OptionalName(json, "transitionOut");
++            var frames = Property(json, "frames");
++            if (frames.ValueKind != JsonValueKind.Array || frames.GetArrayLength() != frameCount) throw new InvalidDataException("帧数不匹配");
++            var list = new List<AnimationFrame>(frameCount);
++            var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++            long encodedBytes = 0;
++            foreach (var frame in frames.EnumerateArray())
++            {
++                string relative = Text(frame, "file"), hash = Text(frame, "sha256");
++                if (relative.Length > 240 || Path.IsPathRooted(relative) || relative.Contains(':') ||
++                    relative.Split('/', '\\').Any(part => part is ".." or "." or "") || !relative.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
++                    throw new InvalidDataException("帧路径无效");
++                string path = Path.GetFullPath(Path.Combine(directory, relative));
++                if (!path.StartsWith(directory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || !unique.Add(path))
++                    throw new InvalidDataException("帧路径越界或重复");
++                CheckNoLinks(path);
++                if (!Regex.IsMatch(hash, "\\A[0-9a-fA-F]{64}\\z")) throw new InvalidDataException("帧哈希无效");
++                long bytes = new FileInfo(path).Length;
++                if (bytes < 33 || bytes > MaxFrameBytes || (encodedBytes += bytes) > MaxClipBytes) throw new InvalidDataException("图片文件超出限制");
++                list.Add(new AnimationFrame(path, hash));
++            }
++            result = new AnimationClip(name, emotion, fps, loop, priority, entry, exit, width, height, groundY, list.AsReadOnly());
++        }
++        catch (Exception ex) when (IsResourceError(ex)) { LastError = $"片段 {name} 不可用：{ResourceReason(ex)}"; }
++        metadata.Add(name, result);
++        return result;
++    }
++
++    public IReadOnlyList<BitmapSource>? GetFrames(AnimationClip clip)
++    {
++        if (cache.TryGetValue(clip.Name, out var cached)) { cached.Used = ++sequence; return cached.Frames; }
++        if (rejectedFrames.Contains(clip.Name)) return null;
++        try
++        {
++            long bytesNeeded = (long)clip.Width * clip.Height * 4 * clip.Frames.Count;
++            while (cache.Count > 0 && (cacheBytes + bytesNeeded > MaxCacheBytes || cache.Count >= 4))
++            {
++                var oldest = cache.OrderBy(pair => pair.Value.Used).First();
++                cacheBytes -= oldest.Value.Bytes; cache.Remove(oldest.Key);
++            }
++            var frames = new List<BitmapSource>(clip.Frames.Count);
++            foreach (var frame in clip.Frames)
++            {
++                CheckNoLinks(frame.Path);
++                var bytes = ReadBounded(frame.Path, MaxFrameBytes);
++                if (!Convert.ToHexString(SHA256.HashData(bytes)).Equals(frame.Sha256, StringComparison.OrdinalIgnoreCase))
++                    throw new InvalidDataException("图片哈希不符");
++                ValidatePngHeader(bytes, clip.Width, clip.Height);
++                using var stream = new MemoryStream(bytes, false);
++                var decoder = new PngBitmapDecoder(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
++                if (decoder.Frames.Count != 1 || decoder.Frames[0].PixelWidth != clip.Width || decoder.Frames[0].PixelHeight != clip.Height)
++                    throw new InvalidDataException("图片画布不匹配");
++                BitmapSource bitmap = decoder.Frames[0];
++                bitmap.Freeze(); frames.Add(bitmap);
++            }
++            var result = frames.AsReadOnly();
++            cache.Add(clip.Name, new CacheEntry(result, bytesNeeded) { Used = ++sequence });
++            cacheBytes += bytesNeeded;
++            return result;
++        }
++        catch (Exception ex) when (IsResourceError(ex))
++        {
++            rejectedFrames.Add(clip.Name); LastError = $"片段 {clip.Name} 不可用：{ResourceReason(ex)}"; return null;
++        }
++    }
++
++    private static void ValidatePngHeader(byte[] bytes, int width, int height)
++    {
++        ReadOnlySpan<byte> signature = stackalloc byte[] { 137, 80, 78, 71, 13, 10, 26, 10 };
++        if (bytes.Length < 33 || !bytes.AsSpan(0, 8).SequenceEqual(signature) || bytes[12] != 'I' || bytes[13] != 'H' || bytes[14] != 'D' || bytes[15] != 'R')
++            throw new InvalidDataException("不是 PNG 图片");
++        int pngWidth = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(bytes.AsSpan(16, 4));
++        int pngHeight = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(bytes.AsSpan(20, 4));
++        if (pngWidth != width || pngHeight != height || bytes[24] > 8) throw new InvalidDataException("PNG 尺寸或位深超出限制");
++    }
++
++    private static byte[] ReadBounded(string path, int max)
++    {
++        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
++        if (stream.Length > max || stream.Length < 1) throw new InvalidDataException("资源大小超出限制");
++        var data = new byte[(int)stream.Length];
++        stream.ReadExactly(data);
++        if (stream.ReadByte() != -1) throw new InvalidDataException("资源在读取时变化");
++        return data;
++    }
++
++    // Check every ancestor: a pack under a junction is also rejected; no directory traversal is performed.
++    private static void CheckNoLinks(string path)
++    {
++        string? current = Path.GetFullPath(path);
++        while (!string.IsNullOrEmpty(current))
++        {
++            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException("不允许符号链接或目录联接");
++            current = Path.GetDirectoryName(current);
++        }
++    }
++    private static bool SafeName(string value) => value.Length is > 0 and <= 64 && Regex.IsMatch(value, "\\A[a-z0-9_-]+\\z");
++    private static JsonElement Property(JsonElement value, string name)
++    {
++        foreach (var property in value.EnumerateObject())
++            if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) return property.Value;
++        throw new InvalidDataException("清单缺少字段 " + name);
++    }
++    private static string Text(JsonElement value, string name) => Property(value, name).GetString() ?? throw new InvalidDataException("清单文字无效");
++    private static int Integer(JsonElement value, string name) => Property(value, name).GetInt32();
++    private static double Number(JsonElement value, string name)
++    {
++        double number = Property(value, name).GetDouble();
++        return double.IsFinite(number) ? number : throw new InvalidDataException("清单数值无效");
++    }
++    private static string? OptionalName(JsonElement value, string name)
++    {
++        foreach (var property in value.EnumerateObject())
++            if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
++            {
++                var text = property.Value.ValueKind == JsonValueKind.Null ? null : property.Value.GetString();
++                if (string.IsNullOrEmpty(text)) return null;
++                if (!SafeName(text)) throw new InvalidDataException("过渡片段名称无效");
++                return text;
++            }
++        return null;
++    }
++    private static bool IsResourceError(Exception ex) => ex is InvalidDataException or IOException or UnauthorizedAccessException or JsonException or
++        ArgumentException or InvalidOperationException or NotSupportedException or System.Runtime.InteropServices.COMException or FormatException or OverflowException;
++    private static string ResourceReason(Exception ex) => ex is InvalidDataException ? ex.Message : "文件缺失、损坏或格式不受支持";
++    public void Dispose() { cache.Clear(); metadata.Clear(); rejectedFrames.Clear(); cacheBytes = 0; }
++}
+--- /dev/null
++++ src\Naifrog\Animation\EmotionCatalog.cs
+@@ -0,0 +1,57 @@
++using System;
++using System.Collections.Generic;
++
++namespace Naifrog.Animation;
++
++public record ExpressionDefinition(string Name, string Label, string Gesture, int Priority, bool Automatic = true);
++
++public static class EmotionCatalog
++{
++    public static IReadOnlyList<ExpressionDefinition> Entries { get; } = Array.AsReadOnly(new[]
++    {
++        new ExpressionDefinition("happy", "开心", "bounce", 30),
++        new ExpressionDefinition("surprised", "惊讶", "recoil", 30),
++        new ExpressionDefinition("confused", "困惑", "tilt", 20),
++        new ExpressionDefinition("shy", "害羞", "sway", 25),
++        new ExpressionDefinition("sad", "难过", "sigh", 25),
++        new ExpressionDefinition("angry", "生气", "tremble", 30),
++        new ExpressionDefinition("love", "喜欢", "sway", 25),
++        new ExpressionDefinition("proud", "骄傲", "rise", 25),
++        new ExpressionDefinition("cheer", "加油", "bounce", 30),
++        new ExpressionDefinition("celebrate", "庆祝", "bounce", 35),
++        new ExpressionDefinition("greet", "打招呼", "sway", 25),
++        new ExpressionDefinition("grateful", "感谢", "bow", 25),
++        new ExpressionDefinition("agree", "赞同", "nod", 20),
++        new ExpressionDefinition("refuse", "拒绝", "shake", 25),
++        new ExpressionDefinition("ponder", "思考", "tilt", 20),
++        new ExpressionDefinition("curious", "好奇", "tilt", 20),
++        new ExpressionDefinition("scared", "害怕", "tremble", 30),
++        new ExpressionDefinition("worried", "担心", "sway", 25),
++        new ExpressionDefinition("crying", "哭泣", "tremble", 30),
++        new ExpressionDefinition("wronged", "委屈", "sigh", 25),
++        new ExpressionDefinition("disappointed", "失落", "sigh", 25),
++        new ExpressionDefinition("embarrassed", "尴尬", "sway", 25),
++        new ExpressionDefinition("sleepy", "困倦", "sigh", 20),
++        new ExpressionDefinition("annoyed", "烦恼", "shake", 25),
++        new ExpressionDefinition("relieved", "释然", "breathe", 20),
++        new ExpressionDefinition("hug", "抱抱", "sway", 25),
++        new ExpressionDefinition("smile", "微笑", "breathe", 20, false),
++        new ExpressionDefinition("excited", "兴奋", "bounce", 30, false),
++        new ExpressionDefinition("focused", "专注", "breathe", 35, false),
++        new ExpressionDefinition("bored", "无聊", "sigh", 20, false),
++        new ExpressionDefinition("smug", "得意", "rise", 25, false),
++        new ExpressionDefinition("dizzy", "晕乎", "sway", 25, false),
++        new ExpressionDefinition("shocked", "震惊", "recoil", 35, false),
++        new ExpressionDefinition("organize", "整理文件", "bow", 45, false),
++        // Local business actions, outside the upstream expression catalog.
++        new ExpressionDefinition("eat", "吃点东西（本地动作）", "squat", 40, false),
++        new ExpressionDefinition("walk", "散步（本地动作）", "sway", 40, false)
++    });
++
++    internal static ExpressionDefinition? Find(string name)
++    {
++        foreach (var entry in Entries)
++            if (string.Equals(entry.Name, name, StringComparison.Ordinal)) return entry;
++        return null;
++    }
++}
+--- /dev/null
++++ src\Naifrog\Animation\EmotionScheduler.cs
+@@ -0,0 +1,128 @@
++using System;
++using Naifrog.Core;
++
++namespace Naifrog.Animation;
++
++internal enum PlaybackPhase { Idle, Entry, Main, Exit }
++internal readonly record struct PlaybackTiming(double EntryMs, double MainMs, double ExitMs, bool Loop);
++
++internal sealed class EmotionScheduler
++{
++    private readonly Func<double> clock;
++    private readonly Func<EmotionSettings> options;
++    private readonly Func<string, PlaybackTiming> timing;
++    private Pending? pending;
++    private PlaybackTiming currentTiming;
++    private bool blocked;
++    private bool currentManual;
++    private int priority;
++    private double expiresAt;
++    private double lastStarted = double.NegativeInfinity;
++    private double phaseStarted;
++    private sealed record Pending(EmotionIntent Intent, bool Manual, double ExpiresAt);
++
++    public EmotionScheduler(Func<double> clock, Func<EmotionSettings> options, Func<string, PlaybackTiming> timing)
++    { this.clock = clock; this.options = options; this.timing = timing; }
++    public string Name { get; private set; } = "neutral";
++    public PlaybackPhase Phase { get; private set; }
++    public double StartedAt { get; private set; }
++    public double PhaseStartedAt => phaseStarted;
++    public double Intensity { get; private set; }
++    public bool IsBlocked => blocked;
++    public bool HasWork => Phase != PlaybackPhase.Idle || pending != null;
++
++    public void Submit(EmotionIntent intent, bool manual = false)
++    {
++        Tick();
++        var now = clock();
++        var settings = options();
++        string name = (intent.Name ?? "neutral").Trim().ToLowerInvariant();
++        if (!double.IsFinite(intent.Intensity) || !double.IsFinite(intent.Confidence) ||
++            intent.Intensity < .18 || intent.Confidence < settings.MinimumConfidence ||
++            (!manual && !settings.Enabled) || EmotionCatalog.Find(name) == null)
++            name = "neutral";
++        if (name == "happy" && intent.Intensity < .6) name = "smile";
++        if (name == "neutral")
++        {
++            pending = null;
++            if (!blocked) BeginExit(now);
++            return;
++        }
++        var definition = EmotionCatalog.Find(name)!;
++        var clean = intent with { Name = name, Intensity = Math.Clamp(intent.Intensity, 0, 1),
++            Confidence = Math.Clamp(intent.Confidence, 0, 1), DurationMs = Math.Clamp(intent.DurationMs, 250, 60000),
++            Priority = Math.Max(definition.Priority, Math.Clamp(intent.Priority, 0, 100)) };
++        if (Name == name && Phase != PlaybackPhase.Idle)
++        {
++            Intensity = Intensity * .65 + clean.Intensity * .35;
++            // An exit already in progress finishes once; a repeated classifier result must not replay it.
++            if (Phase != PlaybackPhase.Exit) expiresAt = Math.Max(expiresAt, now + clean.DurationMs);
++            return;
++        }
++        var next = new Pending(clean, manual, now + clean.DurationMs);
++        if (pending == null || manual || clean.Priority >= pending.Intent.Priority) pending = next;
++        Dispatch(now);
++        Tick();
++    }
++
++    public void Tick()
++    {
++        double now = clock();
++        if (!options().Enabled && !currentManual && Phase != PlaybackPhase.Idle) BeginExit(now);
++        if (pending != null && pending.ExpiresAt <= now) pending = null;
++        // A delayed UI tick may cross entry, main and exit in one update.
++        for (int step = 0; step < 6; step++)
++        {
++            if (Phase == PlaybackPhase.Entry)
++            {
++                double end = Math.Min(StartedAt + currentTiming.EntryMs, expiresAt);
++                if (now < end) break;
++                Phase = PlaybackPhase.Main; phaseStarted = end;
++            }
++            else if (Phase == PlaybackPhase.Main)
++            {
++                double end = currentTiming.Loop ? expiresAt : Math.Min(expiresAt, phaseStarted + currentTiming.MainMs);
++                if (now < end) break;
++                BeginExit(end);
++            }
++            else if (Phase == PlaybackPhase.Exit)
++            {
++                if (now < phaseStarted + currentTiming.ExitMs) break;
++                Phase = PlaybackPhase.Idle; Name = "neutral"; Intensity = 0; currentManual = false;
++            }
++            else break;
++        }
++        Dispatch(now);
++    }
++
++    public void SetBlocked(bool value)
++    {
++        blocked = value;
++        Tick();
++    }
++
++    private bool Ready(Pending request, double now) => request.Manual ||
++        (options().Enabled && now - lastStarted >= Math.Clamp(options().CooldownSeconds, 0, 60) * 1000);
++
++    private void Dispatch(double now)
++    {
++        if (blocked || pending == null || pending.ExpiresAt <= now || !Ready(pending, now)) return;
++        if (Phase != PlaybackPhase.Idle)
++        {
++            if (pending.Manual || pending.Intent.Priority >= priority) BeginExit(now);
++            return;
++        }
++        var request = pending; pending = null;
++        Name = request.Intent.Name; Intensity = request.Intent.Intensity; priority = request.Intent.Priority;
++        currentManual = request.Manual; expiresAt = request.ExpiresAt;
++        currentTiming = timing(Name);
++        StartedAt = phaseStarted = lastStarted = now;
++        Phase = currentTiming.EntryMs > 0 ? PlaybackPhase.Entry : PlaybackPhase.Main;
++    }
++
++    private void BeginExit(double now)
++    {
++        if (Phase == PlaybackPhase.Idle || Phase == PlaybackPhase.Exit) return;
++        Phase = PlaybackPhase.Exit; phaseStarted = now;
++    }
++}
+--- /dev/null
++++ src\Naifrog\Animation\PetAnimator.cs
+@@ -0,0 +1,238 @@
++using System;
++using System.Collections.Generic;
++using System.Diagnostics;
++using System.IO;
++using System.Windows;
++using System.Windows.Controls;
++using System.Windows.Media;
++using System.Windows.Media.Imaging;
++using System.Windows.Threading;
++using Naifrog.Core;
++
++namespace Naifrog.Animation;
++
++public sealed class PetAnimator : IDisposable
++{
++    private readonly Image target;
++    private readonly Func<AppearanceSettings> appearance;
++    private readonly Func<EmotionSettings> options;
++    private readonly AnimationLibrary library;
++    private readonly EmotionScheduler scheduler;
++    private readonly Stopwatch clock = Stopwatch.StartNew();
++    private readonly DispatcherTimer timer;
++    private readonly ImageSource? original;
++    private readonly Transform previousTransform;
++    private readonly Point previousOrigin;
++    private readonly ScaleTransform scale = new(1, 1);
++    private readonly RotateTransform rotate = new(0);
++    private readonly TranslateTransform translate = new(0, 0);
++    private AnimationClip? shownClip;
++    private IReadOnlyList<BitmapSource>? shownFrames;
++    private string? attemptedClip;
++    private bool disposed;
++    private bool unloaded;
++    private bool usedFallback;
++    private bool fastTimer;
++    private string status = "";
++    internal bool FastTimerRunning => timer.IsEnabled && fastTimer;
++
++    public PetAnimator(Image target, Func<AppearanceSettings> appearance, Func<EmotionSettings> options, string assetsRoot)
++    {
++        target.Dispatcher.VerifyAccess();
++        this.target = target; this.appearance = appearance; this.options = options;
++        original = LoadOriginal(target.Source);
++        previousTransform = target.RenderTransform; previousOrigin = target.RenderTransformOrigin;
++        var transforms = new TransformGroup();
++        transforms.Children.Add(previousTransform); transforms.Children.Add(scale); transforms.Children.Add(rotate); transforms.Children.Add(translate);
++        target.RenderTransform = transforms; target.RenderTransformOrigin = new Point(.5, .965);
++        library = new AnimationLibrary(assetsRoot);
++        scheduler = new EmotionScheduler(() => clock.Elapsed.TotalMilliseconds, options, GetTiming);
++        timer = new DispatcherTimer(DispatcherPriority.Render, target.Dispatcher);
++        timer.Tick += OnTick;
++        target.Loaded += OnLoaded; target.Unloaded += OnUnloaded;
++        Refresh();
++    }
++
++    public string CurrentEmotion => scheduler.Name;
++    public string Status => status;
++    public event Action? StateChanged;
++
++    public void SetEmotion(EmotionIntent intent, bool manual = false) => OnUi(() =>
++    {
++        scheduler.Submit(intent, manual); Refresh();
++    });
++
++    public void SetBlocked(bool blocked) => OnUi(() =>
++    {
++        scheduler.SetBlocked(blocked); Refresh();
++    });
++
++    public void ApplySettings() => OnUi(() =>
++    {
++        attemptedClip = null; shownFrames = null; shownClip = null;
++        scheduler.Tick(); Refresh();
++    });
++
++    private PlaybackTiming GetTiming(string name)
++    {
++        if (!appearance().UseAnimationPack) return new PlaybackTiming(0, 0, 0, true);
++        var main = library.TryGetInfo(name);
++        if (main == null) return new PlaybackTiming(0, 0, 0, true);
++        var entry = main.TransitionIn == null ? null : library.TryGetInfo(main.TransitionIn);
++        var exit = main.TransitionOut == null ? null : library.TryGetInfo(main.TransitionOut);
++        return new PlaybackTiming(entry?.DurationMs ?? 0, main.DurationMs, exit?.DurationMs ?? 0, main.Loop);
++    }
++
++    private void OnTick(object? sender, EventArgs e) { if (!disposed) { scheduler.Tick(); Refresh(); } }
++    private void OnLoaded(object sender, RoutedEventArgs e) { unloaded = false; Refresh(); }
++    private void OnUnloaded(object sender, RoutedEventArgs e) { unloaded = true; timer.Stop(); }
++
++    private void Refresh()
++    {
++        if (disposed) return;
++        double now = clock.Elapsed.TotalMilliseconds;
++        string name = scheduler.Name;
++        string? requested = null;
++        if (appearance().UseAnimationPack)
++        {
++            if (name == "neutral") requested = "idle";
++            else
++            {
++                var main = library.TryGetInfo(name);
++                requested = scheduler.Phase switch
++                {
++                    PlaybackPhase.Entry => main?.TransitionIn,
++                    PlaybackPhase.Exit => main?.TransitionOut,
++                    _ => name
++                };
++            }
++        }
++        if (requested != attemptedClip)
++        {
++            attemptedClip = requested;
++            // Release the old sequence before decoding the next bounded clip.
++            shownFrames = null;
++            shownClip = requested == null ? null : library.TryGetInfo(requested);
++            if (shownClip != null) shownFrames = library.GetFrames(shownClip);
++        }
++        usedFallback = shownClip == null || shownFrames == null;
++        if (usedFallback)
++        {
++            if (!ReferenceEquals(target.Source, original)) target.Source = original;
++        }
++        else
++        {
++            double elapsed = Math.Max(0, now - (name == "neutral" ? 0 : scheduler.PhaseStartedAt));
++            int frame = (int)(elapsed / 1000 * shownClip!.Fps);
++            // Entry and exit always hold their final frame; only main/idle may loop.
++            frame = shownClip.Loop && (scheduler.Phase is PlaybackPhase.Main or PlaybackPhase.Idle)
++                ? frame % shownFrames!.Count : Math.Min(frame, shownFrames!.Count - 1);
++            var source = shownFrames[frame];
++            if (!ReferenceEquals(target.Source, source)) target.Source = source;
++        }
++        ApplyMotion(now);
++        string label = EmotionCatalog.Find(name)?.Label ?? "待机";
++        string phase = scheduler.Phase switch { PlaybackPhase.Entry => " · 入场", PlaybackPhase.Exit => " · 退场", _ => "" };
++        string rendering = usedFallback ? " · 原始立绘" : " · 动画素材";
++        string nextStatus = label + phase + rendering + (scheduler.IsBlocked ? " · 操作中" : "");
++        if (status != nextStatus) { status = nextStatus; StateChanged?.Invoke(); }
++        UpdateTimer();
++    }
++
++    private void ApplyMotion(double now)
++    {
++        double t = now / 1000;
++        double strength = double.IsFinite(options().Strength) ? Math.Clamp(options().Strength, .1, 1) : .6;
++        bool active = scheduler.Phase != PlaybackPhase.Idle;
++        bool motion = options().MicroMotion && !scheduler.IsBlocked;
++        double x = 0, y = 0, angle = 0, sx = 1, sy = 1;
++        if (motion)
++        {
++            double intensity = strength * (active ? scheduler.Intensity : .35);
++            double breath = Math.Sin(t * 2.2);
++            sx += .003 * breath * strength; sy += .006 * breath * strength;
++            string gesture = active ? EmotionCatalog.Find(scheduler.Name)?.Gesture ?? "breathe" : "breathe";
++            switch (gesture)
++            {
++                case "bounce": y -= Math.Abs(Math.Sin(t * 5)) * 6 * intensity; sy += Math.Sin(t * 10) * .012 * intensity; break;
++                case "sway": angle = Math.Sin(t * 2.8) * 2.0 * intensity; break;
++                case "tilt": angle = Math.Sin(t * 1.6) * 2.7 * intensity; break;
++                case "tremble": x = Math.Sin(t * 26) * 1.8 * intensity; break;
++                case "shake": angle = Math.Sin(t * 8) * 1.8 * intensity; break;
++                case "nod": sy += Math.Sin(t * 5) * .018 * intensity; break;
++                case "bow": sy -= (1 + Math.Sin(t * 2)) * .018 * intensity; sx += (1 + Math.Sin(t * 2)) * .009 * intensity; break;
++                case "squat": sy -= (1 + Math.Sin(t * 4)) * .025 * intensity; sx += (1 + Math.Sin(t * 4)) * .012 * intensity; break;
++                case "sigh": sy -= (1 + Math.Sin(t * 1.5)) * .009 * intensity; break;
++                case "rise": sy += .018 * intensity; break;
++                case "recoil": sy -= Math.Abs(Math.Sin(t * 3)) * .02 * intensity; break;
++            }
++            if (active)
++            {
++                double age = now - scheduler.StartedAt;
++                if (age is >= 0 and < 300)
++                {
++                    double settle = Math.Sin(age / 300 * Math.PI) * .015 * intensity;
++                    sy -= settle; sx += settle * .5;
++                }
++            }
++        }
++        scale.ScaleX = Math.Clamp(sx, .94, 1.06); scale.ScaleY = Math.Clamp(sy, .92, 1.06);
++        rotate.Angle = Math.Clamp(angle, -3, 3); translate.X = Math.Clamp(x, -3, 3);
++        double groundFraction = !usedFallback && shownClip != null ? shownClip.GroundY / shownClip.Height : .965;
++        target.RenderTransformOrigin = new Point(.5, groundFraction);
++        // Align the clip's declared ground to the same normalized foot baseline.
++        double height = target.ActualHeight;
++        if (!usedFallback && shownClip != null && target.ActualWidth > 0)
++            height = Math.Min(height, target.ActualWidth * shownClip.Height / shownClip.Width);
++        double alignment = Math.Clamp((.965 - groundFraction) * height, -8, 8);
++        translate.Y = Math.Clamp(y + alignment, -10, 10);
++    }
++
++    private void UpdateTimer()
++    {
++        if (disposed) return;
++        bool micro = options().MicroMotion && !scheduler.IsBlocked;
++        bool sequence = shownFrames is { Count: > 1 } &&
++            (scheduler.Phase != PlaybackPhase.Idle || shownClip?.Loop == true);
++        fastTimer = micro || sequence;
++        bool needed = fastTimer || scheduler.HasWork;
++        TimeSpan interval = TimeSpan.FromMilliseconds(fastTimer ? 40 : 250);
++        if (timer.Interval != interval) timer.Interval = interval;
++        if (needed && !unloaded) timer.Start(); else timer.Stop();
++    }
++
++    private void OnUi(Action action)
++    {
++        if (disposed || target.Dispatcher.HasShutdownStarted) return;
++        if (target.Dispatcher.CheckAccess()) action();
++        else target.Dispatcher.BeginInvoke(new Action(() => { if (!disposed) action(); }));
++    }
++
++    private static ImageSource? LoadOriginal(ImageSource? existing)
++    {
++        try
++        {
++            var bitmap = new BitmapImage(); bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad;
++            bitmap.UriSource = new Uri("pack://application:,,,/Assets/naifrog.png", UriKind.Absolute);
++            bitmap.EndInit(); bitmap.Freeze(); return bitmap;
++        }
++        catch (Exception ex) when (ex is IOException or InvalidOperationException or NotSupportedException or ArgumentException)
++        { return existing; }
++    }
++
++    public void Dispose()
++    {
++        if (disposed) return;
++        if (!target.Dispatcher.CheckAccess())
++        {
++            if (!target.Dispatcher.HasShutdownStarted) target.Dispatcher.Invoke(Dispose);
++            return;
++        }
++        disposed = true; timer.Stop(); timer.Tick -= OnTick;
++        target.Loaded -= OnLoaded; target.Unloaded -= OnUnloaded;
++        target.RenderTransform = previousTransform; target.RenderTransformOrigin = previousOrigin;
++        target.Source = original;
++        shownFrames = null; shownClip = null;
++        library.Dispose(); clock.Stop(); StateChanged = null;
++    }
++}
+--- /dev/null
++++ tests\AnimationChecks\Program.cs
+@@ -0,0 +1,156 @@
++using Naifrog.Animation;
++using Naifrog.Core;
++using System.IO;
++using System.Security.Cryptography;
++using System.Text.Json;
++using System.Windows.Media;
++using System.Windows.Media.Imaging;
++
++internal static class Program
++{
++    private static int checks;
++    [STAThread]
++    private static void Main(string[] args)
++    {
++        double now = 0;
++        var options = new EmotionSettings { CooldownSeconds = 6 };
++        var scheduler = new EmotionScheduler(() => now, () => options, _ => new PlaybackTiming(100, 1000, 200, true));
++        void Check(bool condition, string name) { if (!condition) throw new Exception("FAIL: " + name); checks++; Console.WriteLine("PASS: " + name); }
++        scheduler.Submit(new("happy", .8, 1, 2000));
++        Check(scheduler.Name == "happy" && scheduler.Phase == PlaybackPhase.Entry, "entry begins immediately");
++        now = 150; scheduler.Tick();
++        Check(scheduler.Phase == PlaybackPhase.Main, "elapsed time enters main");
++        var start = scheduler.StartedAt;
++        scheduler.Submit(new("happy", .9, 1, 3000));
++        Check(scheduler.StartedAt == start && scheduler.Intensity > .8, "duplicate merges without restarting");
++        scheduler.Submit(new("sad", .8, 1, 10000));
++        Check(scheduler.Name == "happy", "automatic cooldown defers new emotion");
++        now = 3200; scheduler.Tick();
++        Check(scheduler.Phase == PlaybackPhase.Exit, "duration starts exit");
++        now = 3500; scheduler.Tick();
++        Check(scheduler.Name == "neutral", "exit returns to idle");
++        now = 6001; scheduler.Tick();
++        Check(scheduler.Name == "sad", "pending starts when cooldown ends");
++        scheduler.Submit(new("greet", .8, 1, 4000), true);
++        now = 6250; scheduler.Tick();
++        Check(scheduler.Name == "greet", "manual bypasses cooldown after safe exit");
++
++        now = 20000; scheduler.Tick(); scheduler.SetBlocked(true);
++        scheduler.Submit(new("happy", .8, 1, 1000), true);
++        Check(scheduler.Name == "neutral", "blocked state prevents start");
++        now = 22000; scheduler.SetBlocked(false);
++        Check(scheduler.Name == "neutral", "expired blocked intent is discarded");
++        scheduler.Submit(new("happy", .3, 1, 1000), true);
++        Check(scheduler.Name == "smile", "weak happy selects smile");
++        scheduler.SetBlocked(true);
++        scheduler.Submit(new("organize", 1, 1, 10000), true);
++        Check(scheduler.Name == "smile" && scheduler.Phase != PlaybackPhase.Exit, "blocked state prevents preemption");
++        scheduler.SetBlocked(false); now += 250; scheduler.Tick();
++        Check(scheduler.Name == "organize", "unblocked pending uses transition");
++        scheduler.Submit(new("sad", .9, .1, 1000)); now += 250; scheduler.Tick();
++        Check(scheduler.Name == "neutral", "low confidence returns idle");
++        scheduler.Submit(new("happy", double.NaN, 1), true);
++        Check(scheduler.Name == "neutral", "nonfinite values rejected");
++        scheduler.Submit(new("unknown", 1, 1), true);
++        Check(scheduler.Name == "neutral", "unknown emotion rejected");
++        var finiteScheduler = new EmotionScheduler(() => now, () => options, _ => new PlaybackTiming(100, 1000, 200, false));
++        finiteScheduler.Submit(new("happy", .9, 1, 60000), true);
++        now += 1301; finiteScheduler.Tick();
++        Check(finiteScheduler.Name == "neutral", "nonloop clip finishes before request duration");
++        finiteScheduler.Submit(new("organize", 1, 1, 20000), true);
++        options.CooldownSeconds = 0;
++        finiteScheduler.Submit(new("happy", .9, 1, 10000));
++        Check(finiteScheduler.Name == "organize" && finiteScheduler.Phase != PlaybackPhase.Exit, "lower priority cannot preempt scene");
++        now += 1301; finiteScheduler.Tick();
++        Check(finiteScheduler.Name == "happy", "lower priority waits for scene exit");
++        now += 30000; finiteScheduler.Tick();
++        Check(finiteScheduler.Name == "neutral", "delayed tick crosses all completed phases");
++        var exitingScheduler = new EmotionScheduler(() => now, () => options, _ => new PlaybackTiming(100, 1000, 200, true));
++        exitingScheduler.Submit(new("happy", .9, 1, 500), true);
++        now += 501; exitingScheduler.Tick();
++        exitingScheduler.Submit(new("happy", 1, 1, 6000), true);
++        now += 250; exitingScheduler.Tick();
++        Check(exitingScheduler.Name == "neutral", "duplicate during exit does not replay emotion");
++        var directory = Path.Combine(Path.GetTempPath(), "NaifrogAnimationChecks-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(directory);
++        try
++        {
++            byte[] MakePng()
++            {
++                var bitmap = BitmapSource.Create(2, 2, 96, 96, PixelFormats.Bgra32, null,
++                    new byte[] { 1,2,3,255, 4,5,6,255, 7,8,9,255, 10,11,12,255 }, 8);
++                var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
++                using var stream = new MemoryStream(); encoder.Save(stream); return stream.ToArray();
++            }
++            var bytes = MakePng();
++            void WriteClip(string name, string frameFile = "frame.png", string? hash = null, int width = 2)
++            {
++                var folder = Path.Combine(directory, name); Directory.CreateDirectory(folder);
++                File.WriteAllBytes(Path.Combine(folder, "frame.png"), bytes);
++                File.WriteAllText(Path.Combine(folder, "manifest.json"), JsonSerializer.Serialize(new
++                { name, emotion = "happy", fps = 25, frameCount = 1, loop = true, priority = 30,
++                  canvas = new { width, height = 2 }, groundY = 2,
++                  frames = new[] { new { file = frameFile, sha256 = hash ?? Convert.ToHexString(SHA256.HashData(bytes)) } } }));
++            }
++            WriteClip("valid"); WriteClip("traversal", "../valid/frame.png"); WriteClip("hash", hash: new string('0', 64)); WriteClip("dimensions", width: 5000);
++            var library = new AnimationLibrary(directory);
++            var clip = library.TryGetInfo("valid");
++            Check(clip != null && clip.DurationMs == 40, "valid manifest timing");
++            var frames = library.GetFrames(clip!);
++            Check(frames is { Count: 1 } && frames[0].IsFrozen, "valid PNG decodes frozen");
++            Check(ReferenceEquals(frames, library.GetFrames(clip!)), "clip cache avoids repeat decoding");
++            Check(library.TryGetInfo("traversal") == null, "frame traversal rejected");
++            Check(library.TryGetInfo("../valid") == null, "clip traversal rejected");
++            Check(library.GetFrames(library.TryGetInfo("hash")!) == null, "incorrect frame hash rejected");
++            Check(library.TryGetInfo("dimensions") == null, "oversized canvas rejected before decode");
++            Check(library.TryGetInfo("absent") == null, "missing pack handled");
++            Check(EmotionCatalog.Entries.Count(e => e.Automatic) == 26 && EmotionCatalog.Entries.Count == 36, "complete catalog IDs");
++            var image = new System.Windows.Controls.Image { Source = frames![0] };
++            var appearance = new AppearanceSettings { UseAnimationPack = false };
++            var animationOptions = new EmotionSettings { MicroMotion = false };
++            using (var animator = new PetAnimator(image, () => appearance, () => animationOptions, directory))
++            {
++                var original = image.Source;
++                Check(image.Source is BitmapSource originalBitmap && originalBitmap.PixelWidth > 2, "disabled pack loads original resource artwork");
++                Check(!animator.FastTimerRunning, "static idle stops fast timer");
++                animator.SetEmotion(new("happy", .8), true);
++                Check(animator.CurrentEmotion == "happy", "public animator routes intent");
++                Check(ReferenceEquals(image.Source, original), "emotion micro action preserves original when pack disabled");
++                Check(!animator.FastTimerRunning, "static active request uses slow expiry timer");
++                animationOptions.MicroMotion = true; animator.ApplySettings();
++                Check(animator.FastTimerRunning, "micro motion enables fast timer");
++                appearance.UseAnimationPack = true; animator.ApplySettings();
++                Check(image.Source != null, "missing requested clip retains artwork");
++            }
++            Check(image.RenderTransform == System.Windows.Media.Transform.Identity, "dispose restores image transform");
++        }
++        finally { Directory.Delete(directory, true); }
++        if (args.Length == 2 && args[0] == "--pack")
++        {
++            using var pack = new AnimationLibrary(args[1]);
++            int clipCount = 0, frameCount = 0;
++            foreach (var folder in Directory.GetDirectories(args[1]).OrderBy(p => p))
++            {
++                if (!File.Exists(Path.Combine(folder, "manifest.json"))) continue;
++                string name = Path.GetFileName(folder);
++                var info = pack.TryGetInfo(name);
++                Check(info != null, "pack metadata " + name + " " + pack.LastError);
++                var decoded = pack.GetFrames(info!);
++                Check(decoded?.Count == info!.Frames.Count, "pack decode " + name + " " + pack.LastError);
++                Check(pack.DecodedCacheBytes <= 192L * 1024 * 1024, "pack cache bounded " + name);
++                clipCount++; frameCount += decoded!.Count;
++            }
++            Console.WriteLine($"Pack verified: {clipCount} clips, {frameCount} frames.");
++            var packImage = new System.Windows.Controls.Image();
++            var packAppearance = new AppearanceSettings();
++            using var animator = new PetAnimator(packImage, () => packAppearance, () => new EmotionSettings { MicroMotion = false }, args[1]);
++            Check(animator.CurrentEmotion == "neutral" && packImage.Source is BitmapSource { IsFrozen: true }, "real pack idle initializes frozen");
++            Check(animator.FastTimerRunning, "real idle sequence keeps playback timer");
++            animator.SetEmotion(new("happy", .9), true);
++            Check(animator.CurrentEmotion == "happy" && animator.Status.Contains("入场"), "real pack starts entry clip");
++            packAppearance.UseAnimationPack = false; animator.ApplySettings();
++            Check(animator.Status.Contains("原始立绘") && !animator.FastTimerRunning, "real pack switch disables sequence playback");
++        }
++        Console.WriteLine($"Animation checks: {checks} passed.");
++    }
++}
+--- /dev/null
++++ tests\AnimationChecks\AnimationChecks.csproj
+@@ -0,0 +1,14 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <PropertyGroup>
++    <OutputType>Exe</OutputType>
++    <TargetFramework>net9.0-windows</TargetFramework>
++    <UseWPF>true</UseWPF>
++    <Nullable>enable</Nullable>
++    <ImplicitUsings>enable</ImplicitUsings>
++  </PropertyGroup>
++  <ItemGroup>
++    <Compile Include="../../src/Naifrog/Core/AppSettings.cs" Link="Core/AppSettings.cs" />
++    <Compile Include="../../src/Naifrog/Animation/*.cs" Link="Animation/%(Filename)%(Extension)" />
++    <Resource Include="../../src/Naifrog/Assets/naifrog.png" Link="Assets/naifrog.png" />
++  </ItemGroup>
++</Project>
