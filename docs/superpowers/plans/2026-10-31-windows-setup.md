@@ -8,6 +8,8 @@
 - [x] 添加 build-installer.ps1：自包含发布到独立 payload，再编译 Setup；不执行应用功能测试。
 - [x] 更新 README，提供最新 Setup 下载入口及安装器重建命令。
 - [x] 编译安装程序，确认编译器成功返回及生成的安装文件信息。
-- [ ] 提交并推送安装器源码，创建 GitHub Release，上传 Setup 和 SHA256 清单。
+- [x] 提交并推送安装器源码，创建 GitHub Release，上传 Setup 和 SHA256 清单。
 
 发布前不自动运行安装程序，避免改动开发机的安装目录、快捷方式与卸载注册表。不重跑此前用户要求跳过的应用回归测试。
+
+构建结果：Windows PowerShell 5 脚本已补 UTF-8 BOM；自包含发布与 Inno Setup 6.7.4 编译成功。Setup 为 193221085 字节。GitHub 资产上传返回 HTTP 201，远端 SHA256 与本地均为 `930c031fd17f30ea2f21c7d5b58f5ae2fe6c42d84d001661812e51aef3667251`。应用安装/卸载和功能回归未执行。远端新增的 README 声明已合并保留。
