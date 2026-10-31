@@ -4,6 +4,12 @@ Windows 桌面陪伴程序，C# / .NET 9 / WPF。透明立绘与二维动作，�
 
 ## 开始使用
 
+**[下载安装程序（Windows x64）](https://github.com/MYFSillyBa/Naifrog-Agent/releases/latest/download/Naifrog-Agent-Setup-1.0.0-win-x64.exe)** · [所有版本](https://github.com/MYFSillyBa/Naifrog-Agent/releases)
+
+下载 Setup 后双击安装，包含运行时和全部动画，无需另装 .NET。可选择创建桌面快捷方式；安装器和快捷方式使用奶蛙图标。安装默认使用当前用户目录，升级和卸载保留原有 API 配置与聊天记录。
+
+从源码构建或使用便携版时：
+
 1. 双击 `output\Naifrog\Naifrog.exe`，奶蛙默认出现在屏幕右下角。
 2. 右键奶蛙可直接打开 **工程工作台**，或进入 **设置**、退出。托盘菜单也提供工作台入口。
 3. 在 **模型与聊天** 填写模型连接并保存、测试。
@@ -119,6 +125,14 @@ Windows 桌面陪伴程序，C# / .NET 9 / WPF。透明立绘与二维动作，�
 ```
 
 构建脚本会清理旧产物、发布 EXE/资源并执行角色资源启动检查。运行中程序若占用发布文件，请先退出。
+
+制作单文件 Setup 安装程序需要额外安装 Inno Setup 6：
+
+```powershell
+.\build-installer.ps1 -Version 1.0.0
+```
+
+生成的安装文件和 SHA256 清单位于 `output/installer/`。该脚本只编译发布与安装器；安装器配置和重建说明见 [installer/README.md](installer/README.md)。
 
 主要检查：
 
